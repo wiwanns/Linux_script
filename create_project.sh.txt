@@ -1,0 +1,222 @@
+#!/bin/bash
+
+# -----------------------------
+# Usage: sudo bash create_project.sh demo.com
+# -----------------------------
+set -e
+
+PROJECT_DOMAIN=$1
+if [ -z "$PROJECT_DOMAIN" ]; then
+  echo "Usage: $0 yourdomain.com"
+  exit 1
+fi
+
+PROJECT_NAME=$(echo $PROJECT_DOMAIN | cut -d '.' -f1)
+BASE_PATH="/var/www/vhost-live/$PROJECT_NAME"
+HTTPDOCS="$BASE_PATH/httpdocs"
+LOGS="$BASE_PATH/logs"
+BACKUP="$BASE_PATH/backup"
+SOURCE_DIR="$BASE_PATH/source_code"
+CONFIG="$BASE_PATH/config"
+
+# -----------------------------
+# Create directory structure
+# -----------------------------
+sudo mkdir -p $HTTPDOCS $LOGS $BACKUP $SOURCE_DIR $CONFIG
+sudo chown -R www-data:www-data $BASE_PATH
+
+# -----------------------------
+# Ask Git details
+# -----------------------------
+read -p "Enter Git Repository URL: " REPO
+read -p "Enter Git Username: " GUSER
+read -s -p "Enter Git Token/Key: " GTOKEN
+echo ""
+CLONE_URL=$(echo $REPO | sed "s#https://#https://$GUSER:$GTOKEN@#")
+
+# -----------------------------
+# Clone or Pull Git
+# -----------------------------
+if [ -d "$SOURCE_DIR/.git" ]; then
+    echo "Git repo exists. Pulling latest..."
+    git -C $SOURCE_DIR pull
+else
+    echo "Cloning repository..."
+    git clone $CLONE_URL $SOURCE_DIR
+fi
+
+# -----------------------------
+# Detect Project Type
+# -----------------------------
+cd $SOURCE_DIR
+
+DOTNET_PROJECT=false
+ANGULAR_PROJECT=false
+
+if ls *.csproj >/dev/null 2>&1; then
+    DOTNET_PROJECT=true
+elif [ -f "angular.json" ]; then
+    ANGULAR_PROJECT=true
+fi
+
+# -----------------------------
+# Dynamic .NET Port
+# -----------------------------
+BASE_DOTNET_PORT=5000
+DOTNET_PORT=$BASE_DOTNET_PORT
+while lsof -i:$DOTNET_PORT >/dev/null 2>&1; do
+    DOTNET_PORT=$((DOTNET_PORT+1))
+done
+
+# -----------------------------
+# Build / Copy to httpdocs
+# -----------------------------
+if $DOTNET_PROJECT; then
+    echo "Detected .NET project"
+    dotnet publish -c Release -o $HTTPDOCS
+elif $ANGULAR_PROJECT; then
+    echo "Detected Angular project"
+    npm install
+    ng build --configuration production
+    DIST_FOLDER=$(ls dist | head -n1)
+    cp -r dist/$DIST_FOLDER/* $HTTPDOCS/
+else
+    echo "This is a different language. Please contact Mahendra Pratap Singh."
+    exit 1
+fi
+
+sudo chown -R www-data:www-data $HTTPDOCS
+
+# -----------------------------
+# Ask environment
+# -----------------------------
+read -p "Enter environment (production/staging/uat): " ENV
+
+# -----------------------------
+# NGINX Config
+# -----------------------------
+NGINX_CONF="$CONFIG/$PROJECT_NAME.conf"
+SSL_CERT="/etc/ssl/certs/$PROJECT_DOMAIN.crt"
+SSL_KEY="/etc/ssl/private/$PROJECT_DOMAIN.key"
+
+cat <<EOF | sudo tee $NGINX_CONF
+server {
+    listen 80;
+    server_name $PROJECT_DOMAIN;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $PROJECT_DOMAIN;
+
+    root $HTTPDOCS;
+    index index.html index.htm index.php;
+
+    ssl_certificate $SSL_CERT;
+    ssl_certificate_key $SSL_KEY;
+
+    # Angular SPA
+    location / {
+EOF
+
+if $ANGULAR_PROJECT; then
+    echo "        try_files \$uri \$uri/ /index.html;" | sudo tee -a $NGINX_CONF
+fi
+
+cat <<EOF | sudo tee -a $NGINX_CONF
+    }
+
+    # .NET reverse proxy
+EOF
+
+if $DOTNET_PROJECT; then
+cat <<EOF | sudo tee -a $NGINX_CONF
+    location /dotnet/ {
+        proxy_pass http://127.0.0.1:$DOTNET_PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+EOF
+fi
+
+cat <<EOF | sudo tee -a $NGINX_CONF
+    # PHP support
+    location ~ \.php\$ {
+        include fastcgi_params;
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
+}
+EOF
+
+# -----------------------------
+# Master include
+# -----------------------------
+MASTER_CONF="/etc/nginx/sites-available/zzzmahendra.conf"
+if ! grep -q "include $BASE_PATH/config/*.conf;" $MASTER_CONF 2>/dev/null; then
+    echo "include /var/www/vhost-live/*/config/*.conf;" | sudo tee -a $MASTER_CONF
+fi
+
+sudo nginx -t
+sudo systemctl reload nginx
+
+# -----------------------------
+# Systemd Service for .NET
+# -----------------------------
+if $DOTNET_PROJECT; then
+SERVICE_FILE="/etc/systemd/system/$PROJECT_NAME.service"
+
+cat <<EOF | sudo tee $SERVICE_FILE
+[Unit]
+Description=$PROJECT_NAME .NET Service
+After=network.target
+
+[Service]
+WorkingDirectory=$HTTPDOCS
+ExecStart=/usr/bin/dotnet $HTTPDOCS/*.dll
+Restart=always
+Environment=ASPNETCORE_ENVIRONMENT=$ENV
+User=www-data
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable $PROJECT_NAME
+sudo systemctl start $PROJECT_NAME
+fi
+
+# -----------------------------
+# Hosts Entry
+# -----------------------------
+SERVER_IP=$(hostname -I | awk '{print $1}')
+if ! grep -q "$PROJECT_DOMAIN" /etc/hosts; then
+    echo "$SERVER_IP $PROJECT_DOMAIN" | sudo tee -a /etc/hosts
+fi
+
+# -----------------------------
+# Summary
+# -----------------------------
+echo ""
+echo "======================================"
+echo "Project Created Successfully!"
+echo "Project Name: $PROJECT_NAME"
+echo "Domain: $PROJECT_DOMAIN"
+if $DOTNET_PROJECT; then
+    echo ".NET running on port: $DOTNET_PORT"
+fi
+echo "Environment: $ENV"
+echo "URL: https://$PROJECT_DOMAIN"
+echo "Directories:"
+echo "  - Source Code: $SOURCE_DIR"
+echo "  - Build/Httpdocs: $HTTPDOCS"
+echo "  - Logs: $LOGS"
+echo "  - Backup: $BACKUP"
+echo "======================================"
+echo "Thank you!"

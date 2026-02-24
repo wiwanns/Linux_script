@@ -1,0 +1,111 @@
+#!/bin/bash
+
+# ----------------------------------
+# Load SA Credentials
+# ----------------------------------
+if [ ! -f /etc/.sql ]; then
+    echo "Error: /etc/.sql file not found!"
+    exit 1
+fi
+
+source /etc/.sql
+
+# Check sqlcmd
+if ! command -v sqlcmd &> /dev/null; then
+    echo "sqlcmd not found. Install mssql-tools first."
+    exit 1
+fi
+
+echo ""
+echo "========= MSSQL Database Manager ========="
+echo "1) Create Database"
+echo "2) Delete Database"
+echo "3) Restore Database"
+echo "4) Backup Database"
+echo "==========================================="
+read -p "Select option [1-4]: " OPTION
+
+case $OPTION in
+
+# ----------------------------------
+# CREATE DATABASE
+# ----------------------------------
+1)
+    read -p "Enter Database Name: " DB_NAME
+
+    DB_PASSWORD=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9@#%_' | head -c 16)
+    DB_USER="${DB_NAME}_user"
+
+    sqlcmd -S $MSSQL_HOST -U $MSSQL_USER -P "$MSSQL_PASSWORD" -Q "
+    CREATE DATABASE [$DB_NAME];
+    CREATE LOGIN [$DB_USER] WITH PASSWORD = '$DB_PASSWORD';
+    USE [$DB_NAME];
+    CREATE USER [$DB_USER] FOR LOGIN [$DB_USER];
+    ALTER ROLE db_owner ADD MEMBER [$DB_USER];
+    "
+
+    echo ""
+    echo "Database Created Successfully!"
+    echo "Database : $DB_NAME"
+    echo "Username : $DB_USER"
+    echo "Password : $DB_PASSWORD"
+    ;;
+
+# ----------------------------------
+# DELETE DATABASE
+# ----------------------------------
+2)
+    read -p "Enter Database Name to Delete: " DB_NAME
+    read -p "Are you sure you want to delete $DB_NAME? Press Y to confirm: " CONFIRM
+
+    if [[ "$CONFIRM" == "Y" || "$CONFIRM" == "y" ]]; then
+        sqlcmd -S $MSSQL_HOST -U $MSSQL_USER -P "$MSSQL_PASSWORD" -Q "
+        ALTER DATABASE [$DB_NAME] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+        DROP DATABASE [$DB_NAME];
+        "
+        echo "Database Deleted Successfully!"
+    else
+        echo "Operation Cancelled."
+    fi
+    ;;
+
+# ----------------------------------
+# RESTORE DATABASE
+# ----------------------------------
+3)
+    read -p "Enter New Database Name: " DB_NAME
+    read -p "Enter Backup File Full Path (.bak): " BACKUP_FILE
+
+    sqlcmd -S $MSSQL_HOST -U $MSSQL_USER -P "$MSSQL_PASSWORD" -Q "
+    RESTORE DATABASE [$DB_NAME]
+    FROM DISK = N'$BACKUP_FILE'
+    WITH REPLACE;
+    "
+
+    echo "Database Restored Successfully!"
+    ;;
+
+# ----------------------------------
+# BACKUP DATABASE
+# ----------------------------------
+4)
+    read -p "Enter Database Name to Backup: " DB_NAME
+    read -p "Enter Backup Directory Path: " BACKUP_PATH
+
+    BACKUP_FILE="$BACKUP_PATH/${DB_NAME}_$(date +%Y%m%d%H%M%S).bak"
+
+    sqlcmd -S $MSSQL_HOST -U $MSSQL_USER -P "$MSSQL_PASSWORD" -Q "
+    BACKUP DATABASE [$DB_NAME]
+    TO DISK = N'$BACKUP_FILE'
+    WITH FORMAT, INIT;
+    "
+
+    echo "Backup Completed!"
+    echo "Backup File: $BACKUP_FILE"
+    ;;
+
+*)
+    echo "Invalid Option!"
+    ;;
+
+esac

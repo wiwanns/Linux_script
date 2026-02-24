@@ -1,0 +1,132 @@
+#!/bin/bash
+
+echo "Updating system..."
+sudo apt update -y && sudo apt upgrade -y
+
+sudo apt install -y wget curl gnupg apt-transport-https software-properties-common openssl
+
+# -----------------------------
+# Select MSSQL Version
+# -----------------------------
+echo ""
+echo "Select SQL Server Version:"
+echo "1) SQL Server 2019"
+echo "2) SQL Server 2022 (Recommended)"
+read -p "Enter choice [1-2]: " VERSION_CHOICE
+
+if [ "$VERSION_CHOICE" == "1" ]; then
+    MSSQL_VERSION="2019"
+elif [ "$VERSION_CHOICE" == "2" ]; then
+    MSSQL_VERSION="2022"
+else
+    echo "Invalid choice. Defaulting to 2022."
+    MSSQL_VERSION="2022"
+fi
+
+# -----------------------------
+# Select Edition
+# -----------------------------
+echo ""
+echo "Select Edition:"
+echo "1) Developer"
+echo "2) Standard"
+echo "3) Express"
+echo "4) Enterprise"
+echo "5) Use Product Key"
+read -p "Enter choice [1-5]: " EDITION_CHOICE
+
+PRODUCT_KEY=""
+case $EDITION_CHOICE in
+    1) MSSQL_PID="Developer" ;;
+    2) MSSQL_PID="Standard" ;;
+    3) MSSQL_PID="Express" ;;
+    4) MSSQL_PID="Enterprise" ;;
+    5)
+        read -p "Enter Product Key: " PRODUCT_KEY
+        MSSQL_PID="$PRODUCT_KEY"
+        ;;
+    *)
+        echo "Invalid choice. Defaulting to Developer."
+        MSSQL_PID="Developer"
+        ;;
+esac
+
+# -----------------------------
+# Generate SA Password
+# -----------------------------
+SA_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9@#%_' | head -c 20)
+
+# -----------------------------
+# Add Microsoft Repository
+# -----------------------------
+echo "Adding Microsoft repository..."
+
+wget -qO- https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+sudo add-apt-repository "$(wget -qO- https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/mssql-server-${MSSQL_VERSION}.list)"
+
+sudo apt update -y
+
+# -----------------------------
+# Install MSSQL Server
+# -----------------------------
+sudo apt install -y mssql-server
+
+# -----------------------------
+# Configure MSSQL
+# -----------------------------
+echo "Configuring SQL Server..."
+
+sudo MSSQL_SA_PASSWORD="$SA_PASSWORD" MSSQL_PID="$MSSQL_PID" /opt/mssql/bin/mssql-conf -n setup accept-eula
+
+# -----------------------------
+# Install SQL Tools
+# -----------------------------
+curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list
+
+sudo apt update -y
+sudo apt install -y mssql-tools unixodbc-dev
+
+echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
+source ~/.bashrc
+
+sudo systemctl enable mssql-server
+sudo systemctl restart mssql-server
+
+# -----------------------------
+# Save Inventory Securely
+# -----------------------------
+echo "Saving configuration to /etc/.sql ..."
+
+sudo bash -c "cat > /etc/.sql <<EOF
+MSSQL_VERSION=$MSSQL_VERSION
+MSSQL_EDITION=$MSSQL_PID
+MSSQL_HOST=localhost
+MSSQL_USER=sa
+MSSQL_PASSWORD=$SA_PASSWORD
+MSSQL_PRODUCT_KEY=$PRODUCT_KEY
+INSTALL_DATE=$(date)
+EOF"
+
+sudo chmod 600 /etc/.sql
+
+# -----------------------------
+# Final Output
+# -----------------------------
+echo ""
+echo "======================================"
+echo "SQL Server Installed Successfully!"
+echo "======================================"
+echo "Version     : $MSSQL_VERSION"
+echo "Edition     : $MSSQL_PID"
+echo "Host        : localhost"
+echo "Username    : sa"
+echo "SA Password : $SA_PASSWORD"
+
+if [ ! -z "$PRODUCT_KEY" ]; then
+    echo "Product Key : $PRODUCT_KEY"
+fi
+
+echo ""
+echo "Inventory saved at: /etc/.sql"
+echo "======================================"

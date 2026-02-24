@@ -1,0 +1,54 @@
+#!/bin/bash
+
+echo "Updating system..."
+sudo apt update -y && sudo apt upgrade -y
+
+echo "Installing required dependencies..."
+sudo apt install -y wget curl git nginx software-properties-common apt-transport-https ca-certificates gnupg lsb-release build-essential
+
+# -----------------------------
+# Install Microsoft Package Repo
+# -----------------------------
+echo "Adding Microsoft package repository..."
+wget https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+rm packages-microsoft-prod.deb
+sudo apt update -y
+
+# -----------------------------
+# Install .NET SDK Versions
+# -----------------------------
+echo "Installing .NET SDK versions..."
+
+sudo apt install -y dotnet-sdk-6.0 || true
+sudo apt install -y dotnet-sdk-7.0 || true
+sudo apt install -y dotnet-sdk-8.0 || true
+
+# Optional: ASP.NET Runtime
+sudo apt install -y aspnetcore-runtime-6.0 || true
+sudo apt install -y aspnetcore-runtime-7.0 || true
+sudo apt install -y aspnetcore-runtime-8.0 || true
+
+# -----------------------------
+# Install Node LTS
+# -----------------------------
+echo "Installing Node LTS..."
+
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# -----------------------------
+# Install Angular CLI
+# -----------------------------
+sudo npm install -g @angular/cli
+
+# -----------------------------
+# Enable & Start NGINX
+# -----------------------------
+sudo systemctl enable nginx
+sudo systemctl start nginx
+
+echo ""
+echo "======================================"
+echo "All required packages installed successfully!"
+echo "======================================"
