@@ -1,0 +1,133 @@
+#!/bin/bash
+
+# Ensure script is executed with root privileges
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root" 
+   exit 1
+fi
+
+# Input variables
+read -p "Enter domain name (e.g., example.com): " domain
+read -p "Enter database name: " dbname
+read -p "Enter database username: " dbuser
+read -s -p "Enter database password: " dbpass
+echo
+
+# Install required packages
+#apt update
+#apt install apache2 libapache2-mod-fcgid
+#apt install software-properties-common
+#add-apt-repository ppa:ondrej/php
+#apt install php7.4 php7.4-fpm
+#apt update
+#apt install -y apache2 mysql-server php libapache2-mod-php php-mysql vsftpd
+#apt install phpmyadmin -y
+
+
+# Enable Apache modules
+a2enmod ssl
+a2enmod rewrite
+systemctl restart apache2
+
+# Create website directory
+mkdir -p /var/www/vhosts/$domain/httpdocs
+mkdir -p /var/www/vhosts/$domain/{conf,logs,web_users,pd,bin,httpdocs,cgi-bin,db,cron,documentation,httpdocs/config,httpdocs/phplib,httpdocs/templates,httpdocs/images,certificate}
+mkdir -p /var/www/vhosts/$domain/documentation/{design,release,receivables,content}
+
+chown -R root:root /var/www/$domain/{conf,logs,web_users,pd,bin,httpdocs,cgi-bin,db,cron,documentation,httpdocs/config,httpdocs/phplib,httpdocs/templates,httpdocs/images,certificate}
+chown -R root:root /var/www/$domain/{conf,logs,web_users,pd,bin,httpdocs,cgi-bin,db,cron,documentation,httpdocs/config,httpdocs/phplib,httpdocs/templates,httpdocs/images,certificate}
+
+
+# Create SSL certificate
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /var/www/vhosts/$domain/certificate/$domain.key -out /var/www/vhosts/$domain/certificate/$domain.crt
+
+ls -s /var/run/php/$.sock/ /var/www/vhosts/$domain/cgi-bin/
+
+# Create virtual host configuration
+#cat << EOF > /etc/apache2/sites-available/$domain.conf
+cat << EOF > /var/www/vhosts/$domain/conf/$domain.conf
+
+<VirtualHost 192.168.106.10 *:443>
+    ServerAdmin mahendra@$domain
+    ServerName $domain
+    DocumentRoot /var/www/vhosts/$domain/httpdocs
+
+    <Directory /var/www/vhosts/$domain>
+     Options +ExecCGI
+     AddHandler cgi-script .cgi
+     AllowOverride All
+     Require all granted
+     </Directory>
+
+     ScriptAlias /cgi-bin/ /var/www/vhosts/$domain/cgi-bin/
+     <Directory "/var/www/vhosts/$domain/cgi-bin">
+      AllowOverride None
+      Options +ExecCGI -MultiViews +SymLinksIfOwnerMatch
+      Require all granted
+     </Directory>
+
+     <FilesMatch \.php$>
+	#Apache 2.4.10+ can proxy to unix socket
+	SetHandler "proxy:unix:/var/run/php/php7.4-fpm.sock|fcgi://localhost"
+	</FilesMatch>
+
+
+    ErrorLog /var/www/vhosts/$domain/logs/error_log
+    CustomLog /var/www/vhosts/$domain/logs/access_log combined
+    SSLEngine on
+    SSLCertificateFile /var/www/vhosts/$domain/certificate/$domain.crt
+    SSLCertificateKeyFile /var/www/vhosts/$domain/certificate/$domain.key
+
+    RewriteEngine On
+    RewriteCond %{HTTPS} off
+    RewriteRule ^(.*)$ https://$domain/$1 [L,R=301]
+    
+
+
+</VirtualHost>
+EOF
+
+cat > /var/www/vhosts/$domain/httpdocs/index.php <<eof
+<?
+echo "Please upload your site's data here."
+?>
+eof
+
+
+#cp -a /var/www/.skel/* /var/www/vhosts/$domain/httpdocs/
+
+echo "Done."
+
+chown -R www-data:www-data /var/www/$domain
+
+ln -s /var/www/vhosts/$domain/conf/$domain.conf /etc/apache2/sites-enabled/
+ln -s /var/www/vhosts/$domain/conf/$domain.conf /etc/apache2/sites-available/
+
+# Enable the virtual host
+a2enmod actions
+a2enmod actions fcgid alias proxy_fcgi
+a2ensite $domain
+systemctl reload apache2
+
+# Create MySQL database and user
+ mysql -e "CREATE DATABASE $dbname;"
+ mysql -e "CREATE USER '$dbuser'@'localhost' IDENTIFIED BY '$dbpass';"
+ mysql -e "GRANT ALL PRIVILEGES ON $dbname.* TO '$dbuser'@'localhost';"
+ mysql -e "FLUSH PRIVILEGES;"
+
+# Create FTP user
+read -p "Enter FTP username: " ftpuser
+read -s -p "Enter FTP password: " ftppass
+echo 
+useradd -m $ftpuser
+echo "$ftpuser:$ftppass" | chpasswd
+usermod -aG www-data $ftpuser
+chown -R $ftpuser:www-data /var/www/vhosts/$domain/httpdocs
+chmod -R 775 /var/www/vhosts/$domain/httpdocs
+
+# Configure vsftpd
+sed -i 's/#write_enable=YES/write_enable=YES/' /etc/vsftpd.conf
+systemctl restart vsftpd
+
+echo "Setup completed successfully!"
+

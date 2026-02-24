@@ -1,0 +1,10 @@
+			open vpn install in ubantu 20. lts
+1. apt update && apt upgrade -y
+2. apt install ca-certificates wget net-tools gnupg
+3. wget -qO - https://as-repository.openvpn.net/as-repo-public.gpg | apt-key add -
+4. echo "deb http://as-repository.openvpn.net/as/debian focal main">/etc/apt/sources.list.d/openvpn-as-repo.list
+5. apt update
+6. apt -y install openvpn-as
+ login web 
+7.passwd openvpn
+new password

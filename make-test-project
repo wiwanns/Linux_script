@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# Ensure script is executed with root privileges
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root" 
+   exit 1
+fi
+
+# Input variables
+read -p "Enter domain name (e.g., example.com): " domain
+read -p "Enter database name: " dbname
+read -p "Enter database username: " dbuser
+read -s -p "Enter database password: " dbpass
+echo
+
+# Install required packages
+apt update
+apt install -y apache2 mysql-server php libapache2-mod-php php-mysql vsftpd
+
+# Enable Apache modules
+a2enmod ssl
+a2enmod rewrite
+systemctl restart apache2
+
+# Create SSL certificate
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/ssl/private/$domain.key -out /etc/ssl/certs/$domain.crt
+
+# Create virtual host configuration
+cat << EOF > /etc/apache2/sites-available/$domain.conf
+<VirtualHost *:443>
+    ServerAdmin webmaster@$domain
+    ServerName $domain
+    DocumentRoot /var/www/$domain
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+    SSLEngine on
+    SSLCertificateFile /etc/ssl/certs/$domain.crt
+    SSLCertificateKeyFile /etc/ssl/private/$domain.key
+</VirtualHost>
+EOF
+
+# Create website directory
+mkdir /var/www/$domain
+chown -R www-data:www-data /var/www/$domain
+
+# Enable the virtual host
+a2ensite $domain
+systemctl reload apache2
+
+# Create MySQL database and user
+mysql -e "CREATE DATABASE $dbname;"
+mysql -e "CREATE USER '$dbuser'@'localhost' IDENTIFIED BY '$dbpass';"
+mysql -e "GRANT ALL PRIVILEGES ON $dbname.* TO '$dbuser'@'localhost';"
+mysql -e "FLUSH PRIVILEGES;"
+
+# Create FTP user
+read -p "Enter FTP username: " ftpuser
+read -s -p "Enter FTP password: " ftppass
+echo
+useradd -m $ftpuser
+echo "$ftpuser:$ftppass" | chpasswd
+usermod -aG www-data $ftpuser
+chown -R $ftpuser:www-data /var/www/$domain
+chmod -R 775 /var/www/$domain
+
+# Configure vsftpd
+sed -i 's/#write_enable=YES/write_enable=YES/' /etc/vsftpd.conf
+systemctl restart vsftpd
+
+echo "Setup completed successfully!"
+

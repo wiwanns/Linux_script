@@ -1,0 +1,33 @@
+ubantu active directry and domain controller installetion 
+
+1. sudo apt update && sudo apt upgrade -y
+2. hostnamectl
+2. sudo-i		standard user to root user
+3. apt update 		again update
+4. ltimedatectl
+5. apt -y install samba krb5-config winbind smbclient
+6. ask dafault kerberos version 5 realm:	EXAMPLE.COM
+7. ask kerberos servers for your realm:		ad.example.com
+8. ask administrative server for your kerberos realm:	ad.example.com
+9. vim /etc/hosts	insert server ip and 		ad.example.com
+10. cd /etc/samba/
+11. mv smb.conf smb.conf.install
+12. samba-tool domain provision
+		NEXT
+ MAP FORWARD DNS IP 8.8.8.8
+13. Administrator password
+14. cp /var/lib/samba/private/krb5.conf /etc/
+15. systemctl disable --now smbd nmbd winbind systemd-resolved
+16. systemctl unmask samba-ad-dc.service
+17. systemctl enable --now samba-ad-dc.service
+18. samba-tool domain level show
+19. ls -l /etc/resolv.conf
+20. rm /etc/resolv.conf
+21. vim /etc/resolv.conf
+    insert   nameserver 127.0.0.1
+22. samba-tool user create user1      create user commond 
+
+
+https://www.server-world.info/en/note?os=Ubuntu_18.04&p=samba&f=4
+https://www.server-world.info/en/note?os=Ubuntu_18.04&p=samba&f=2
+sudo apt install tasksel
