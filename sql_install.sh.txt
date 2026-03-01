@@ -1,9 +1,28 @@
 #!/bin/bash
+set -e
+
+# =========================================================
+# CHECK ROOT
+# =========================================================
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run as root (use sudo)"
+  exit 1
+fi
+
+# =========================================================
+# CHECK OS VERSION (Ubuntu 22.04 Only)
+# =========================================================
+OS_VERSION=$(lsb_release -rs)
+
+if [ "$OS_VERSION" != "22.04" ]; then
+  echo "This script supports Ubuntu 22.04 LTS only."
+  exit 1
+fi
 
 echo "Updating system..."
-sudo apt update -y && sudo apt upgrade -y
+apt update -y && apt upgrade -y
 
-sudo apt install -y wget curl gnupg apt-transport-https software-properties-common openssl
+apt install -y wget curl gnupg apt-transport-https software-properties-common openssl
 
 # -----------------------------
 # Select MSSQL Version
@@ -57,48 +76,67 @@ esac
 SA_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9@#%_' | head -c 20)
 
 # -----------------------------
-# Add Microsoft Repository
+# Add Microsoft GPG Key (Modern Method)
 # -----------------------------
 echo "Adding Microsoft repository..."
 
-wget -qO- https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-sudo add-apt-repository "$(wget -qO- https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/mssql-server-${MSSQL_VERSION}.list)"
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+chmod go+r /etc/apt/keyrings/microsoft.gpg
 
-sudo apt update -y
+# Remove old repo if exists
+rm -f /etc/apt/sources.list.d/mssql-server.list
+rm -f /etc/apt/sources.list.d/msprod.list
+
+# Add MSSQL Server Repo
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/22.04/mssql-server-${MSSQL_VERSION} jammy main" \
+> /etc/apt/sources.list.d/mssql-server.list
+
+# Add Tools Repo
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
+> /etc/apt/sources.list.d/msprod.list
+
+apt update -y
 
 # -----------------------------
 # Install MSSQL Server
 # -----------------------------
-sudo apt install -y mssql-server
+apt install -y mssql-server
 
 # -----------------------------
 # Configure MSSQL
 # -----------------------------
 echo "Configuring SQL Server..."
-
-sudo MSSQL_SA_PASSWORD="$SA_PASSWORD" MSSQL_PID="$MSSQL_PID" /opt/mssql/bin/mssql-conf -n setup accept-eula
+MSSQL_SA_PASSWORD="$SA_PASSWORD" MSSQL_PID="$MSSQL_PID" /opt/mssql/bin/mssql-conf -n setup accept-eula
 
 # -----------------------------
 # Install SQL Tools
 # -----------------------------
-curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list
+apt install -y mssql-tools unixodbc-dev
 
-sudo apt update -y
-sudo apt install -y mssql-tools unixodbc-dev
+echo 'export PATH="$PATH:/opt/mssql-tools/bin"' > /etc/profile.d/mssql.sh
+chmod +x /etc/profile.d/mssql.sh
 
-echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
-source ~/.bashrc
+# -----------------------------
+# Enable & Start Service
+# -----------------------------
+systemctl enable mssql-server
+systemctl restart mssql-server
 
-sudo systemctl enable mssql-server
-sudo systemctl restart mssql-server
+# Verify Service
+if systemctl is-active --quiet mssql-server; then
+    echo "SQL Server service is running."
+else
+    echo "SQL Server failed to start."
+    exit 1
+fi
 
 # -----------------------------
 # Save Inventory Securely
 # -----------------------------
 echo "Saving configuration to /etc/.sql ..."
 
-sudo bash -c "cat > /etc/.sql <<EOF
+cat > /etc/.sql <<EOF
 MSSQL_VERSION=$MSSQL_VERSION
 MSSQL_EDITION=$MSSQL_PID
 MSSQL_HOST=localhost
@@ -106,9 +144,9 @@ MSSQL_USER=sa
 MSSQL_PASSWORD=$SA_PASSWORD
 MSSQL_PRODUCT_KEY=$PRODUCT_KEY
 INSTALL_DATE=$(date)
-EOF"
+EOF
 
-sudo chmod 600 /etc/.sql
+chmod 600 /etc/.sql
 
 # -----------------------------
 # Final Output
