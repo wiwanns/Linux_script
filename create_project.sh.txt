@@ -1,105 +1,207 @@
 #!/bin/bash
-
-# -----------------------------
-# Usage: sudo bash create_project.sh demo.com
-# -----------------------------
 set -e
 
-PROJECT_DOMAIN=$1
+# =========================================================
+# CHECK ROOT
+# =========================================================
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run as root (use sudo)"
+  exit 1
+fi
+
+# =========================================================
+# DOMAIN INPUT
+# =========================================================
+PROJECT_DOMAIN="$1"
 if [ -z "$PROJECT_DOMAIN" ]; then
   echo "Usage: $0 yourdomain.com"
   exit 1
 fi
 
-PROJECT_NAME=$(echo $PROJECT_DOMAIN | cut -d '.' -f1)
+PROJECT_NAME=$(echo "$PROJECT_DOMAIN" | cut -d '.' -f1)
+
 BASE_PATH="/var/www/vhost-live/$PROJECT_NAME"
 HTTPDOCS="$BASE_PATH/httpdocs"
 LOGS="$BASE_PATH/logs"
 BACKUP="$BASE_PATH/backup"
 SOURCE_DIR="$BASE_PATH/source_code"
-CONFIG="$BASE_PATH/config"
+CONFIG_DIR="$BASE_PATH/config"
 
-# -----------------------------
-# Create directory structure
-# -----------------------------
-sudo mkdir -p $HTTPDOCS $LOGS $BACKUP $SOURCE_DIR $CONFIG
-sudo chown -R www-data:www-data $BASE_PATH
+PROJECT_NGINX_CONF="$CONFIG_DIR/include.conf"
+MAIN_NGINX_CONF="/etc/nginx/sites-available/ZZzmahendra.conf"
 
-# -----------------------------
-# Ask Git details
-# -----------------------------
-read -p "Enter Git Repository URL: " REPO
-read -p "Enter Git Username: " GUSER
-read -s -p "Enter Git Token/Key: " GTOKEN
-echo ""
-CLONE_URL=$(echo $REPO | sed "s#https://#https://$GUSER:$GTOKEN@#")
+mkdir -p "$HTTPDOCS" "$LOGS" "$BACKUP" "$SOURCE_DIR" "$CONFIG_DIR"
+chown -R www-data:www-data "$BASE_PATH"
 
-# -----------------------------
-# Clone or Pull Git
-# -----------------------------
-if [ -d "$SOURCE_DIR/.git" ]; then
-    echo "Git repo exists. Pulling latest..."
-    git -C $SOURCE_DIR pull
-else
-    echo "Cloning repository..."
-    git clone $CLONE_URL $SOURCE_DIR
-fi
+cd "$SOURCE_DIR"
 
-# -----------------------------
-# Detect Project Type
-# -----------------------------
-cd $SOURCE_DIR
+# =========================================================
+# PROJECT TYPE
+# =========================================================
+echo "Select Project Type:"
+echo "1) .NET"
+echo "2) Angular"
+read -p "Enter choice (1/2): " PROJECT_TYPE
 
 DOTNET_PROJECT=false
 ANGULAR_PROJECT=false
 
-if ls *.csproj >/dev/null 2>&1; then
+if [ "$PROJECT_TYPE" == "1" ]; then
     DOTNET_PROJECT=true
-elif [ -f "angular.json" ]; then
+elif [ "$PROJECT_TYPE" == "2" ]; then
     ANGULAR_PROJECT=true
-fi
-
-# -----------------------------
-# Dynamic .NET Port
-# -----------------------------
-BASE_DOTNET_PORT=5000
-DOTNET_PORT=$BASE_DOTNET_PORT
-while lsof -i:$DOTNET_PORT >/dev/null 2>&1; do
-    DOTNET_PORT=$((DOTNET_PORT+1))
-done
-
-# -----------------------------
-# Build / Copy to httpdocs
-# -----------------------------
-if $DOTNET_PROJECT; then
-    echo "Detected .NET project"
-    dotnet publish -c Release -o $HTTPDOCS
-elif $ANGULAR_PROJECT; then
-    echo "Detected Angular project"
-    npm install
-    ng build --configuration production
-    DIST_FOLDER=$(ls dist | head -n1)
-    cp -r dist/$DIST_FOLDER/* $HTTPDOCS/
 else
-    echo "This is a different language. Please contact Mahendra Pratap Singh."
+    echo "Invalid selection."
     exit 1
 fi
 
-sudo chown -R www-data:www-data $HTTPDOCS
+# =========================================================
+# GIT
+# =========================================================
+echo "Git is mandatory for deployment."
 
-# -----------------------------
-# Ask environment
-# -----------------------------
-read -p "Enter environment (production/staging/uat): " ENV
+read -p "Enter Git Repository URL: " REPO
+read -p "Enter Branch Name: " BRANCH
 
-# -----------------------------
-# NGINX Config
-# -----------------------------
-NGINX_CONF="$CONFIG/$PROJECT_NAME.conf"
-SSL_CERT="/etc/ssl/certs/$PROJECT_DOMAIN.crt"
-SSL_KEY="/etc/ssl/private/$PROJECT_DOMAIN.key"
+if git ls-remote "$REPO" &>/dev/null; then
+    CLONE_URL="$REPO"
+else
+    read -p "Git Username: " GUSER
+    read -s -p "Git Token/Password: " GTOKEN
+    echo ""
+    CLONE_URL=$(echo "$REPO" | sed "s#https://#https://$GUSER:$GTOKEN@#")
+fi
 
-cat <<EOF | sudo tee $NGINX_CONF
+git config --global --add safe.directory "$SOURCE_DIR" || true
+
+if [ -d ".git" ]; then
+    sudo -u www-data git fetch origin
+    sudo -u www-data git reset --hard origin/"$BRANCH"
+else
+    sudo -u www-data git clone -b "$BRANCH" "$CLONE_URL" .
+fi
+
+# =========================================================
+# BUILD
+# =========================================================
+rm -rf "$HTTPDOCS"/*
+mkdir -p "$HTTPDOCS"
+
+if $DOTNET_PROJECT; then
+
+    echo "Searching for .NET project file..."
+
+    mapfile -t ALL_PROJECTS < <(find . -type f -name "*.csproj" \
+      ! -path "*/bin/*" \
+      ! -path "*/obj/*")
+
+    if [ ${#ALL_PROJECTS[@]} -eq 0 ]; then
+        echo "No .csproj file found in repository!"
+        exit 1
+    fi
+
+    # Try to detect Web SDK project
+    WEB_PROJECT=""
+    for proj in "${ALL_PROJECTS[@]}"; do
+        if grep -q "Microsoft.NET.Sdk.Web" "$proj"; then
+            WEB_PROJECT="$proj"
+            break
+        fi
+    done
+
+    if [ -n "$WEB_PROJECT" ]; then
+        CSPROJ_FILE="$WEB_PROJECT"
+    else
+        if [ ${#ALL_PROJECTS[@]} -gt 1 ]; then
+            echo "Multiple projects found:"
+            select choice in "${ALL_PROJECTS[@]}"; do
+                CSPROJ_FILE="$choice"
+                break
+            done
+        else
+            CSPROJ_FILE="${ALL_PROJECTS[0]}"
+        fi
+    fi
+
+    echo "Selected Project: $CSPROJ_FILE"
+
+    # Detect environment files
+    mapfile -t ENV_FILES < <(find . -name "appsettings.*.json" ! -name "appsettings.json")
+
+    if [ ${#ENV_FILES[@]} -eq 0 ]; then
+        ASP_ENV="Production"
+    else
+        echo "Available Environments:"
+        for i in "${!ENV_FILES[@]}"; do
+            FILE=$(basename "${ENV_FILES[$i]}")
+            ENV_NAME=$(echo "$FILE" | sed 's/appsettings.//' | sed 's/.json//')
+            echo "$((i+1))) $ENV_NAME"
+        done
+
+        read -p "Select environment number: " ENV_CHOICE
+        INDEX=$((ENV_CHOICE-1))
+        FILE=$(basename "${ENV_FILES[$INDEX]}")
+        ASP_ENV=$(echo "$FILE" | sed 's/appsettings.//' | sed 's/.json//')
+    fi
+
+    DOTNET_PORT=5000
+    while lsof -i:$DOTNET_PORT >/dev/null 2>&1; do
+        DOTNET_PORT=$((DOTNET_PORT+1))
+    done
+
+    dotnet restore "$CSPROJ_FILE"
+    dotnet publish "$CSPROJ_FILE" -c Release -o "$HTTPDOCS"
+
+    DLL_NAME=$(basename "$CSPROJ_FILE" .csproj).dll
+
+elif $ANGULAR_PROJECT; then
+
+    read -p "Build Type (production/development): " BUILD_TYPE
+
+    sudo -u www-data npm install
+    sudo -u www-data npx ng build --configuration="$BUILD_TYPE"
+
+    DIST_FOLDER=$(ls dist | head -n1)
+    cp -r "dist/$DIST_FOLDER/"* "$HTTPDOCS/"
+fi
+
+chown -R www-data:www-data "$HTTPDOCS"
+
+# =========================================================
+# SYSTEMD (.NET ONLY)
+# =========================================================
+if $DOTNET_PROJECT; then
+
+SERVICE_FILE="/etc/systemd/system/$PROJECT_NAME.service"
+
+cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=$PROJECT_NAME .NET Service
+After=network.target
+
+[Service]
+WorkingDirectory=$HTTPDOCS
+ExecStart=/usr/bin/dotnet $HTTPDOCS/$DLL_NAME
+Restart=always
+RestartSec=5
+User=www-data
+Environment=ASPNETCORE_ENVIRONMENT=$ASP_ENV
+Environment=ASPNETCORE_URLS=http://0.0.0.0:$DOTNET_PORT
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable "$PROJECT_NAME"
+systemctl restart "$PROJECT_NAME"
+
+fi
+
+# =========================================================
+# NGINX CONFIG
+# =========================================================
+cat > "$PROJECT_NGINX_CONF" <<EOF
 server {
     listen 80;
     server_name $PROJECT_DOMAIN;
@@ -107,116 +209,62 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name $PROJECT_DOMAIN;
 
-    root $HTTPDOCS;
-    index index.html index.htm index.php;
-
-    ssl_certificate $SSL_CERT;
-    ssl_certificate_key $SSL_KEY;
-
-    # Angular SPA
-    location / {
+    ssl_certificate /etc/ssl/certs/wildcard.mahendra.com.crt;
+    ssl_certificate_key /etc/ssl/private/wildcard.mahendra.com.key;
 EOF
 
 if $ANGULAR_PROJECT; then
-    echo "        try_files \$uri \$uri/ /index.html;" | sudo tee -a $NGINX_CONF
+cat >> "$PROJECT_NGINX_CONF" <<EOF
+    root $HTTPDOCS;
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+EOF
 fi
 
-cat <<EOF | sudo tee -a $NGINX_CONF
-    }
-
-    # .NET reverse proxy
-EOF
-
 if $DOTNET_PROJECT; then
-cat <<EOF | sudo tee -a $NGINX_CONF
-    location /dotnet/ {
+cat >> "$PROJECT_NGINX_CONF" <<EOF
+    location / {
         proxy_pass http://127.0.0.1:$DOTNET_PORT;
         proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
     }
 EOF
 fi
 
-cat <<EOF | sudo tee -a $NGINX_CONF
-    # PHP support
-    location ~ \.php\$ {
-        include fastcgi_params;
-        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-    }
-}
-EOF
+echo "}" >> "$PROJECT_NGINX_CONF"
 
-# -----------------------------
-# Master include
-# -----------------------------
-MASTER_CONF="/etc/nginx/sites-available/zzzmahendra.conf"
-if ! grep -q "include $BASE_PATH/config/*.conf;" $MASTER_CONF 2>/dev/null; then
-    echo "include /var/www/vhost-live/*/config/*.conf;" | sudo tee -a $MASTER_CONF
+if [ ! -f "$MAIN_NGINX_CONF" ]; then
+    touch "$MAIN_NGINX_CONF"
 fi
 
-sudo nginx -t
-sudo systemctl reload nginx
-
-# -----------------------------
-# Systemd Service for .NET
-# -----------------------------
-if $DOTNET_PROJECT; then
-SERVICE_FILE="/etc/systemd/system/$PROJECT_NAME.service"
-
-cat <<EOF | sudo tee $SERVICE_FILE
-[Unit]
-Description=$PROJECT_NAME .NET Service
-After=network.target
-
-[Service]
-WorkingDirectory=$HTTPDOCS
-ExecStart=/usr/bin/dotnet $HTTPDOCS/*.dll
-Restart=always
-Environment=ASPNETCORE_ENVIRONMENT=$ENV
-User=www-data
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable $PROJECT_NAME
-sudo systemctl start $PROJECT_NAME
+if ! grep -q "$PROJECT_NGINX_CONF" "$MAIN_NGINX_CONF"; then
+    echo "include $PROJECT_NGINX_CONF;" >> "$MAIN_NGINX_CONF"
 fi
 
-# -----------------------------
-# Hosts Entry
-# -----------------------------
-SERVER_IP=$(hostname -I | awk '{print $1}')
-if ! grep -q "$PROJECT_DOMAIN" /etc/hosts; then
-    echo "$SERVER_IP $PROJECT_DOMAIN" | sudo tee -a /etc/hosts
-fi
+ln -sf "$MAIN_NGINX_CONF" /etc/nginx/sites-enabled/ZZzmahendra.conf
 
-# -----------------------------
-# Summary
-# -----------------------------
+nginx -t
+systemctl reload nginx
+
+# =========================================================
+# FINAL OUTPUT
+# =========================================================
 echo ""
 echo "======================================"
-echo "Project Created Successfully!"
-echo "Project Name: $PROJECT_NAME"
-echo "Domain: $PROJECT_DOMAIN"
-if $DOTNET_PROJECT; then
-    echo ".NET running on port: $DOTNET_PORT"
-fi
-echo "Environment: $ENV"
+echo "Project Deployed Successfully"
 echo "URL: https://$PROJECT_DOMAIN"
-echo "Directories:"
-echo "  - Source Code: $SOURCE_DIR"
-echo "  - Build/Httpdocs: $HTTPDOCS"
-echo "  - Logs: $LOGS"
-echo "  - Backup: $BACKUP"
+
+if $DOTNET_PROJECT; then
+  echo "Dotnet Port: $DOTNET_PORT"
+  echo "Service Status: $(systemctl is-active $PROJECT_NAME)"
+fi
+
 echo "======================================"
-echo "Thank you!"
+echo ""
