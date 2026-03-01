@@ -1,54 +1,115 @@
 #!/bin/bash
-
-echo "Updating system..."
-sudo apt update -y && sudo apt upgrade -y
-
-echo "Installing required dependencies..."
-sudo apt install -y wget curl git nginx software-properties-common apt-transport-https ca-certificates gnupg lsb-release build-essential
+set -e
 
 # -----------------------------
-# Install Microsoft Package Repo
+# Check Root Permission
 # -----------------------------
-echo "Adding Microsoft package repository..."
-wget https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
-sudo dpkg -i packages-microsoft-prod.deb
-rm packages-microsoft-prod.deb
-sudo apt update -y
+if [ "$EUID" -ne 0 ]; then
+  echo "Run with: sudo ./install_all.sh"
+  exit 1
+fi
+
+echo "======================================"
+echo " Updating system..."
+echo "======================================"
+apt update -y
+apt upgrade -y
+
+echo "======================================"
+echo " Installing dependencies..."
+echo "======================================"
+apt install -y wget curl git nginx software-properties-common \
+apt-transport-https ca-certificates gnupg lsb-release build-essential
 
 # -----------------------------
-# Install .NET SDK Versions
+# Configure Microsoft Repo
 # -----------------------------
-echo "Installing .NET SDK versions..."
+echo "======================================"
+echo " Configuring Microsoft repository..."
+echo "======================================"
 
-sudo apt install -y dotnet-sdk-6.0 || true
-sudo apt install -y dotnet-sdk-7.0 || true
-sudo apt install -y dotnet-sdk-8.0 || true
-
-# Optional: ASP.NET Runtime
-sudo apt install -y aspnetcore-runtime-6.0 || true
-sudo apt install -y aspnetcore-runtime-7.0 || true
-sudo apt install -y aspnetcore-runtime-8.0 || true
+if [ ! -f /etc/apt/sources.list.d/microsoft-prod.list ]; then
+    UBUNTU_VERSION=$(lsb_release -rs)
+    wget https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb -O /tmp/msprod.deb
+    dpkg -i /tmp/msprod.deb
+    rm -f /tmp/msprod.deb
+    apt update -y
+else
+    echo "Microsoft repository already configured."
+fi
 
 # -----------------------------
-# Install Node LTS
+# Auto Detect Supported .NET SDK Versions
 # -----------------------------
-echo "Installing Node LTS..."
+echo "======================================"
+echo " Detecting supported .NET SDK versions..."
+echo "======================================"
 
-curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-sudo apt install -y nodejs
+SDK_LIST=$(apt-cache search '^dotnet-sdk-[0-9]' | awk '{print $1}')
+
+for sdk in $SDK_LIST
+do
+    echo "Installing $sdk"
+    apt install -y $sdk
+done
+
+# -----------------------------
+# Auto Detect Supported ASP.NET Runtimes
+# -----------------------------
+echo "======================================"
+echo " Detecting supported ASP.NET runtimes..."
+echo "======================================"
+
+RUNTIME_LIST=$(apt-cache search '^aspnetcore-runtime-[0-9]' | awk '{print $1}')
+
+for runtime in $RUNTIME_LIST
+do
+    echo "Installing $runtime"
+    apt install -y $runtime
+done
+
+# -----------------------------
+# Install Node LTS (Safe Check)
+# -----------------------------
+echo "======================================"
+echo " Installing Node LTS..."
+echo "======================================"
+
+if ! command -v node &> /dev/null
+then
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+    apt install -y nodejs
+else
+    echo "Node already installed."
+fi
 
 # -----------------------------
 # Install Angular CLI
 # -----------------------------
-sudo npm install -g @angular/cli
+if ! command -v ng &> /dev/null
+then
+    npm install -g @angular/cli
+fi
 
 # -----------------------------
-# Enable & Start NGINX
+# Enable NGINX
 # -----------------------------
-sudo systemctl enable nginx
-sudo systemctl start nginx
+systemctl enable nginx
+systemctl restart nginx
+
+# -----------------------------
+# Verification
+# -----------------------------
+echo ""
+echo "======================================"
+echo " Installed .NET SDKs:"
+dotnet --list-sdks || true
+
+echo ""
+echo " Installed .NET Runtimes:"
+dotnet --list-runtimes || true
 
 echo ""
 echo "======================================"
-echo "All required packages installed successfully!"
+echo " Installation Completed Successfully!"
 echo "======================================"
